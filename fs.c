@@ -84,6 +84,7 @@ bfree(int dev, uint b)
   struct buf *bp;
   int bi, m;
 
+  readsb(dev, &sb);
   bp = bread(dev, BBLOCK(b, sb));
   bi = b % BPB;
   m = 1 << (bi % 8);
@@ -109,7 +110,7 @@ bfree(int dev, uint b)
 // to provide a place for synchronizing access
 // to inodes used by multiple processes. The cached
 // inodes include book-keeping information that is
-// not stored on disk: ip->ref and ip->valid.
+// not stored on disk: ip->ref and ip->flags.
 //
 // An inode and its in-memory representation go through a
 // sequence of states before they can be used by the
@@ -127,14 +128,16 @@ bfree(int dev, uint b)
 //   decrements ref.
 //
 // * Valid: the information (type, size, &c) in an inode
-//   cache entry is only correct when ip->valid is 1.
-//   ilock() reads the inode from
-//   the disk and sets ip->valid, while iput() clears
-//   ip->valid if ip->ref has fallen to zero.
+//   cache entry is only correct when the I_VALID bit
+//   is set in ip->flags. ilock() reads the inode from
+//   the disk and sets I_VALID, while iput() clears
+//   I_VALID if ip->ref has fallen to zero.
 //
 // * Locked: file system code may only examine and modify
 //   the information in an inode and its content if it
-//   has first locked the inode.
+//   has first locked the inode. The I_BUSY flag is to indicate
+//   that the inode is locked. ilock() sets I_BUSY,
+//   while iunlock() clears it.
 //
 // Thus a typical sequence is:
 //   ip = iget(dev, inum)
@@ -171,16 +174,14 @@ struct {
 void
 iinit(int dev)
 {
-  int i = 0;
-  
   initlock(&icache.lock, "icache");
-  for(i = 0; i < NINODE; i++) {
-    initsleeplock(&icache.inode[i].lock, "inode");
-  }
+
+  // for(int i = 0; i < NINODE; i++) {
+  //   initsleeplock(&icache.inode[i].lock, "inode");
+  // }
 
   readsb(dev, &sb);
-  cprintf("sb: size %d nblocks %d ninodes %d nlog %d logstart %d\
- inodestart %d bmap start %d\n", sb.size, sb.nblocks,
+  cprintf("sb: size %d nblocks %d ninodes %d nlog %d logstart %d inodestart %d bmap start %d\n", sb.size, sb.nblocks,
           sb.ninodes, sb.nlog, sb.logstart, sb.inodestart,
           sb.bmapstart);
 }
@@ -189,8 +190,9 @@ static struct inode* iget(uint dev, uint inum);
 
 //PAGEBREAK!
 // Allocate an inode on device dev.
-// Mark it as allocated by  giving it type type.
+// Mark it as allocated by giving it type type.
 // Returns an unlocked but allocated and referenced inode.
+// A free inode has a type of zero.
 struct inode*
 ialloc(uint dev, short type)
 {
@@ -265,7 +267,7 @@ iget(uint dev, uint inum)
   ip->dev = dev;
   ip->inum = inum;
   ip->ref = 1;
-  ip->valid = 0;
+  ip->flags = 0;
   release(&icache.lock);
 
   return ip;
@@ -293,7 +295,11 @@ ilock(struct inode *ip)
   if(ip == 0 || ip->ref < 1)
     panic("ilock");
 
-  acquiresleep(&ip->lock);
+  acquire(&icache.lock);
+  while (ip->flags & I_BUSY)
+    sleep(ip, &icache.lock);
+  ip->flags |= I_BUSY;
+  release(&icache.lock);
 
   if(ip->valid == 0){
     bp = bread(ip->dev, IBLOCK(ip->inum, sb));
@@ -305,7 +311,7 @@ ilock(struct inode *ip)
     ip->size = dip->size;
     memmove(ip->addrs, dip->addrs, sizeof(ip->addrs));
     brelse(bp);
-    ip->valid = 1;
+    ip->flags |= I_VALID;
     if(ip->type == 0)
       panic("ilock: no type");
   }
@@ -315,10 +321,13 @@ ilock(struct inode *ip)
 void
 iunlock(struct inode *ip)
 {
-  if(ip == 0 || !holdingsleep(&ip->lock) || ip->ref < 1)
+  if(ip == 0 || !(ip->flags & I_BUSY) || ip->ref < 1)
     panic("iunlock");
 
-  releasesleep(&ip->lock);
+  acquire(&icache.lock);
+  ip->flags &= ~I_BUSY;
+  wakeup(ip);
+  release(&icache.lock);
 }
 
 // Drop a reference to an in-memory inode.
@@ -331,22 +340,22 @@ iunlock(struct inode *ip)
 void
 iput(struct inode *ip)
 {
-  acquiresleep(&ip->lock);
-  if(ip->valid && ip->nlink == 0){
-    acquire(&icache.lock);
-    int r = ip->ref;
-    release(&icache.lock);
-    if(r == 1){
-      // inode has no links and no other references: truncate and free.
-      itrunc(ip);
-      ip->type = 0;
-      iupdate(ip);
-      ip->valid = 0;
-    }
-  }
-  releasesleep(&ip->lock);
-
   acquire(&icache.lock);
+  if (ip->ref == 1 && (ip->flags & I_VALID) && ip->nlink == 0)
+  {
+    // inode has no links and no other references: truncate and free.
+    if (ip->flags & I_BUSY)
+      panic("iput busy");
+    ip->flags |= I_BUSY;
+    release(&icache.lock);
+    itrunc(ip);
+    ip->type = 0;
+    iupdate(ip);
+    acquire(&icache.lock);
+    ip->flags = 0;
+    wakeup(ip);
+  }
+
   ip->ref--;
   release(&icache.lock);
 }
@@ -667,4 +676,144 @@ struct inode*
 nameiparent(char *path, char *name)
 {
   return namex(path, 1, name);
+}
+
+
+
+
+#include "fcntl.h"
+#define DIGITS 14
+
+char *itoa(int i, char b[])
+{
+  char const digit[] = "0123456789";
+  char *p = b;
+  if (i < 0)
+  {
+    *p++ = '-';
+    i *= -1;
+  }
+  int shifter = i;
+  do
+  { //Move to where representation ends
+    ++p;
+    shifter = shifter / 10;
+  } while (shifter);
+  *p = '\0';
+  do
+  { //Move back, inserting digits as u go
+    *--p = digit[i % 10];
+    i = i / 10;
+  } while (i);
+  return b;
+}
+
+//remove swap file of proc p;
+int removeSwapFile(struct proc *p)
+{
+  //path of proccess
+  char path[DIGITS];
+  memmove(path, "/.swap", 6);
+  itoa(p->pid, path + 6);
+
+  struct inode *ip, *dp;
+  struct dirent de;
+  char name[DIRSIZ];
+  uint off;
+
+  if (p->swapFile == 0)
+    return -1;
+  fileclose(p->swapFile);
+  begin_op();
+  if ((dp = nameiparent(path, name)) == 0)
+  {
+    end_op();
+    return -1;
+  }
+
+  ilock(dp);
+
+  // Cannot unlink "." or "..".
+  if (namecmp(name, ".") == 0 || namecmp(name, "..") == 0)
+    goto bad;
+
+  if ((ip = dirlookup(dp, name, &off)) == 0)
+    goto bad;
+  ilock(ip);
+
+  if (ip->nlink < 1)
+    panic("unlink: nlink < 1");
+  if (ip->type == T_DIR && !isdirempty(ip))
+  {
+    iunlockput(ip);
+    goto bad;
+  }
+
+  memset(&de, 0, sizeof(de));
+  if (writei(dp, (char *)&de, off, sizeof(de)) != sizeof(de))
+    panic("unlink: writei");
+  if (ip->type == T_DIR)
+  {
+    dp->nlink--;
+    iupdate(dp);
+  }
+  iunlockput(dp);
+
+  ip->nlink--;
+  iupdate(ip);
+  iunlockput(ip);
+
+  end_op();
+
+  return 0;
+
+bad:
+  iunlockput(dp);
+  end_op();
+  return -1;
+}
+
+//return 0 on success
+int createSwapFile(struct proc *p)
+{
+
+  char path[DIGITS];
+  memmove(path, "/.swap", 6);
+  itoa(p->pid, path + 6);
+
+  begin_op();
+  struct inode *in = create(path, T_FILE, 0, 0);
+  iunlock(in);
+
+  p->swapFile = filealloc();
+  if (p->swapFile == 0)
+    panic("no slot for files on /store");
+
+  p->swapFile->ip = in;
+  p->swapFile->type = FD_INODE;
+  p->swapFile->off = 0;
+  p->swapFile->readable = O_WRONLY;
+  p->swapFile->writable = O_RDWR;
+  end_op();
+
+  return 0;
+}
+
+//return as sys_write (-1 when error)
+int writeToSwapFile(struct proc *p, char *buffer, uint placeOnFile, uint size)
+{
+  int temp;
+  p->swapFile->off = placeOnFile;
+  //cprintf("\ncalled\n");
+  temp = filewrite(p->swapFile, buffer, size);
+  //cprintf("temp = %d\n",temp);
+  return temp;
+}
+
+//return as sys_read (-1 when error)
+int readFromSwapFile(struct proc *p, char *buffer, uint placeOnFile, uint size)
+{
+  p->swapFile->off = placeOnFile;
+
+  return fileread(p->swapFile, buffer, size);
 }
