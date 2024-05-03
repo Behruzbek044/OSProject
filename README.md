@@ -12,6 +12,8 @@ Also make sure `git`, `make` and `gcc` is installed:
 ```shell
 sudo apt install git make gcc
 ```
+Next
+```shell
 git clone https://github.com/Behruzbek044/OSProject xv6
 sudo chmod 700 -R xv6
 cd xv6
