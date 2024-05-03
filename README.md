@@ -7,6 +7,11 @@ Our project utilizes the Xv6 OS kernel implementation provided by <https://githu
 ```shell
 sudo apt install qemu qemu-system-x86
 sudo apt install libc6:i386
+```
+Also make sure `git`, `make` and `gcc` is installed:
+```shell
+sudo apt install git make gcc
+```
 git clone https://github.com/Behruzbek044/OSProject xv6
 sudo chmod 700 -R xv6
 cd xv6
