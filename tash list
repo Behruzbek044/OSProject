@@ -1,0 +1,15 @@
+[33ma44ad81[m[33m ([m[1;35mrefs/stash[m[33m)[m WIP on main: dc4e843 Defined the page fault interrupt
+[33m0c1de43[m index on main: dc4e843 Defined the page fault interrupt
+[33mdc4e843[m[33m ([m[1;36mHEAD -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m Defined the page fault interrupt
+[33me521a92[m Defined the two new system call functions, removed static from methods isdirempty(), create()
+[33m9649730[m Declared two new syscalls, updated exec.c syscall
+[33m6d68d91[m Updated defs.h header
+[33m2d7719f[m Added page count to physical allocator
+[33mf3843a5[m Add files via upload
+[33m0363b74[m Configured filesystem code:
+[33m26b6ade[m Merge branch 'main' of https://github.com/Behruzbek044/OSProject
+[33m0e74bfb[m Add custom page replacement and process management enhancements
+[33m07cfa50[m Merge branch 'main' of https://github.com/Behruzbek044/OSProject
+[33m658f33f[m Add custom page replacement and process management enhancements
+[33m4f9a155[m Add custom page replacement and process management enhancements
+[33m0178eb9[m init commit
