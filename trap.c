@@ -36,6 +36,8 @@ idtinit(void)
 void
 trap(struct trapframe *tf)
 {
+  int addr;
+  pde_t *vaddr;
   if(tf->trapno == T_SYSCALL){
     if(myproc()->killed)
       exit();
@@ -50,6 +52,11 @@ trap(struct trapframe *tf)
   case T_IRQ0 + IRQ_TIMER:
     if(cpuid() == 0){
       acquire(&tickslock);
+
+      #if NFU
+        updateNFUState();
+      #endif
+
       ticks++;
       wakeup(&ticks);
       release(&tickslock);
@@ -77,6 +84,18 @@ trap(struct trapframe *tf)
             cpuid(), tf->cs, tf->eip);
     lapiceoi();
     break;
+
+  case T_PGFLT:
+    addr = rcr2();
+    vaddr = &(myproc()->pgdir[PDX(addr)]);
+    if(((int)(*vaddr) & PTE_P)!=0){
+      if(((uint*)PTE_ADDR(P2V(*vaddr)))[PTX(addr)] & PTE_PG){
+        //cprintf("called T_PGFLT\n");
+        swapPages(PTE_ADDR(addr));
+        ++myproc()->page_fault_count;
+        return;
+      }
+    }
 
   //PAGEBREAK: 13
   default:
