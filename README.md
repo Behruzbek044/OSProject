@@ -4,7 +4,15 @@ Our project utilizes the Xv6 OS kernel implementation provided by <https://githu
 
 ## Implementation Details
 ### Running the code:
-make clean && make qemu-nox SELECTION=FLAG1 VERBOSE_PRINT=FLAG2
+```shell
+sudo apt install qemu qemu-system-x86
+sudo apt install libc6:i386
+git clone https://github.com/Behruzbek044/OSProject xv6
+sudo chmod 700 -R xv6
+cd xv6
+make clean
+make qemu SELECTION=FLAG1 VERBOSE_PRINT=FLAG2
+```
 ### Structs:
 **freepg**: Node of linked lists of pages (max = 15) present in the main memory and the swap space.
 - <img src="https://i.imgur.com/p5Vd1Ck.png"/>
