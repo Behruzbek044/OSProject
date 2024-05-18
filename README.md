@@ -21,38 +21,120 @@ make qemu SELECTION=FLAG1 VERBOSE_PRINT=FLAG2
 ```
 
 # Implementation Details
-## Data Structures:
+
+## `struct`s:
 
 **freepg**: 
 
-  - This is a node of linked lists of pages (up to a maximum of 15) that are present in both the main memory and the swap space. It contains the virtual address of the page, its age, pointers to the next and previous nodes in the list, and the location of the page in the swap space.
-  
+  - Node of linked lists of pages (max = 15) present in the main memory and the swap space.
+    ```c
+    struct freepg {
+      char *va;
+      int age;
+      struct freepg *next;
+      struct freepg *prev;
+      uint swaploc;
+    };
+    ```
+
 **proc**:
 
-  - This structure has been updated to include arrays of freepg for both main memory and swap space. It also includes additional metadata such as the number of swaps, the number of pages in main memory and swap space, and the number of page faults. 
+  - Added arrays of freepg for both main memory and physical memory.
+  - Added other metadata like # of swaps, # of pages in main memory and swap space, # page faults.
+    ```c
+    // Per-process state
+    struct proc {
+      uint sz;                     // Size of process memory (bytes)
+      pde_t* pgdir;                // Page table
+      char *kstack;                // Bottom of kernel stack for this process
+      enum procstate state;        // Process state
+      int pid;                     // Process ID
+      struct proc *parent;         // Parent process
+      struct trapframe *tf;        // Trap frame for current syscall
+      struct context *context;     // swtch() here to run process
+      void *chan;                  // If non-zero, sleeping on chan
+      int killed;                  // If non-zero, have been killed
+      struct file *ofile[NOFILE];  // Open files
+      struct inode *cwd;           // Current directory
+      char name[16];               // Process name (debugging)
 
-## Modified Functions:
+      struct file *swapFile;
 
-  - `allocproc(void)` and `exec()`: These functions are responsible for finding an empty process entry in the process table array and executing it, respectively. They have been modified to initialize all process metadata to 0 and all addresses to 0xffffffff. If the NONE flag is not defined, `exec()` creates a swap file for every process except for init and sh.
+      int main_mem_pages;
+      int swap_file_pages;
+      int page_fault_count;
+      int page_swapped_count;
+      
+      struct freepg free_pages[MAX_PSYC_PAGES];
+      struct freepg swap_space_pages[MAX_PSYC_PAGES];
+      struct freepg *head;
+      struct freepg *tail; 
+    };
+    ```
 
-  - `allocuvm()`: This function is responsible for allocating memory for the process. It has been modified to track if the number of pages in the physical memory exceeds 15. If it does, it calls the appropriate paging scheme through the `writePagesToSwapFile()` function, and then updates the number of pages in the process's metadata using the `recordNewPage()` function.
+## Functions changed:
 
-  - `deallocuvm()`: This function deallocates memory from the physical memory and frees both the `free_pages` and `swap_file_pages` arrays of the process it is called for. It also decreases the counts of pages in both main memory and swap space.
+  - `allocproc(void)` and `exec()`: allocproc is responsible for searching an empty process entry in ptable array while exec is responsible for executing it. Changes done: Initialized all the process meta data to 0 and all the addresses to 0xffffffff. If the NONE flag is not defined, exec creates a swap file for every process other than init and sh.
 
-  - `fork()`: This system call has been modified to copy the metadata of a process, including `swap_space_pages` and `free_pages` arrays, and the number of pages in swap file and main memory, to the child process. However, the number of page faults and page swaps are not copied to the child.
+  - `allocuvm()`: Responsile for allocating the memory for the process. Changes done: while allocating changes, tracks if the number of pages in the physical memory exceeds 15. If so, calls the required paging scheme through the writePagesToSwapFile function and later updates the number of pages in the processes' meta data using the recordNewPage function. Also called in `sbrk()` system call to allow a process to allocate its own pages.
 
-  - `exit()`: This system call has been modified to delete the metadata associated with the process. It closes the swap file and removes the pointers, and sets all the number entries to 0.
+  - `deallocuvm()`: deallocates from the physical memory and frees both the free_pages and the swap_file_pages arrays of the process it is called for. Decreaments the counts of pages in both main memory and swap space. Also called by `sbrk()` system call when supplied with negtive # of pages to allow a process to deallocate its own pages.
 
-  - `procdump()`: This function has been modified with the `custom_proc_print()` function to print the counts of pages in swap space and in main memory, page faults, number of swaps, and the percentage of free pages in the physical memory.
+  - `fork() system call`: Copies the meta data of a process including swap_space_pages and free_pages arrays, # of pages in swap file and main memory to the child process. However, # page faults and # page swaps are not copied to the child. Creates a separate swap file for the child process to hold copies of the swapped out pages. This is done to enable **copy-on-write**. The codelet for making swap file for child process is:
+  ```c
+  #ifndef NONE
+    if(curproc->pid > 2)
+    {
+      createSwapFile(np);
+      char buf[PGSIZE/2] = "";
+      int offset = 0;
+      int nread = 0;
+      while((nread == readFromSwapFile(curproc,buf, offset, PGSIZE/2))!=0)
+        if(writeToSwapFile(np, buf, offset, nread) == -1){
+          panic("fork: error while copying the parent's swap file to the child");
+        offset +=nread;
+      }
+    }
+  ```
 
-  - `trap(struct trapframe *tf)`: This function has been modified to call the `updateNFUState()` function in case of timer interrupts to increase the "age" of pages when the NFU paging scheme is being used. It has also been modified to handle a page fault by defining T_PGFLT for trap 14.
+  - `exit()` **system call**: Deletes the meta data associated with the process. Closes the swap file and removes the pointers. Sets all the # entries to 0.
+  ```c
+  #ifndef NONE
+    if(curproc->pid >2 &&  curproc->swapFile!=0 && curproc->swapFile->ref > 0)
+    {
+      removeSwapFile(curproc);
+    }
+  #endif
 
-## New Functions:
+  #if TRUE
+    if(cuscmp(curproc->name,"sh") != 0)
+      custom_proc_print(curproc);
+  #endif
+  ```
 
-  - `WritePagesToSwapFile(char *va)`: This function calls the appropriate paging scheme (FIFO, NFU, SCFIFO) depending on the flag that was set during make. It writes the incoming page into the physical memory and selects a candidate page to be removed from the main memory and written to the swap space.
+  - `procdump()`: Modified with `custom_proc_print()` function to print the counts of pages in swap space and in main memory, page faults, number of swaps and percentage of free pages in the physical memory.
 
-  - `recoredNewPage(char *va)`: This function writes the metadata of the currently added page into the corresponding entry in the `free_pages` array of the process. It also increases the count of pages in the physical memory.
+  - `trap(struct trapframe *tf)`: Modified to call `updateNFUState()` function in case of timer interrupts to increase the "age" of pages when NFU paging scheme is being used. Introduced changes to handle a page fault by defining T_PGFLT for trap 14. On T_PGFLT being called, it executes the supplied service routine handled by the swapPages() function. The codelet for handling pagefault is as follows:
+  ```c
+  case T_PGFLT:
+    addr = rcr2();
+    vaddr = &(myproc()->pgdir[PDX(addr)]);
+    if(((int)(*vaddr) & PTE_P)!=0){
+      if(((uint*)PTE_ADDR(P2V(*vaddr)))[PTX(addr)] & PTE_PG){
+        //cprintf("called T_PGFLT\n");
+        swapPages(PTE_ADDR(addr));
+        ++myproc()->page_fault_count;
+        return;
+      }
+    }
+  ```
 
-  - `swapPages(char *va)`: This function retrieves the page with the given virtual address "va" from the swap space and finds a candidate page to be swapped out of the main memory and into the swap space based on the paging scheme (FIFO, NFU, SCFIFO) defined during make.
+## New functions created:
 
-  - `printStats()` and `procDump()` system calls: These functions print the details of the current process and all current processes, respectively. They are used in `myMemTest.c` to print the results and eliminate the need for `ctrl+P` during execution.
+  - `WritePagesToSwapFile(char *va)`: This function calls the required paging scheme (FIFO, NFU, SCFIFO) depending upon the flag that was set during make. Incoming page is written into the physical memory and a candidate page (selected according to the paging scheme) is removed from the main memory and wriiten to the swap space.
+
+  - `recoredNewPage(char *va)`: Writes the meta-data of the currently added page into the corresponding entry in the free_pages array of the process. Increases the count of pages in the physical memory.
+
+  - `swapPages(char *va)`: Fetches the page with the given virtual address "va" from the swap space and finds a candidate page to be swapped out of the main memory and into the swap space based on (FIFO, NFU, SCFIFO) according to the flag set during make.
+
+  - `printStats()` and `procDump()` system calls: Print the details of the current process and all current processes respectively as per asked by the **Enhanced Details Viewer** section. Call `custom_proc_print()` and `procDump()` functions respectively. Used in myMemTest.c to print the results and do away with `ctrl+P` during execution.
